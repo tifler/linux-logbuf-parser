@@ -1,5 +1,6 @@
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <fcntl.h>
 
 #include <stdio.h>
@@ -31,23 +32,62 @@ struct log {
 
 /*****************************************************************************/
 
-static int parse(int fd, unsigned long offset)
+struct KLogParser {
+    int fd;
+    void *base;
+    unsigned size;
+    unsigned start;
+    unsigned curr;
+};
+
+/*****************************************************************************/
+
+static struct log *toLog(struct KLogParser *parser)
 {
+    return (struct log *)&((u8 *)parser->base)[parser->curr];
+}
+
+static char *log_text(const struct log *msg)
+{
+    return (char *)msg + sizeof(struct log);
+}
+
+static int parse(int fd, unsigned int offset)
+{
+    int ret;
     int count = 0;
     struct stat st;
     struct log *log;
+    struct KLogParser parser;
+    static char buf[512];
 
     ret = fstat(fd, &st);
     ASSERT(ret == 0);
     ASSERT(st.st_size > offset);
 
-    base = (u8 *)mmap(NULL,
+    parser.fd = fd;
+    parser.base = (u8 *)mmap(NULL,
             st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
-    ASSERT(!MAP_FAILED(map));
+    ASSERT(MAP_FAILED != parser.base);
+    parser.size = st.st_size;
+    parser.start = offset;
+    parser.curr = offset;
 
-    do {
-        log = next_log(parser);
-    };
+    for ( ; ; ) {
+        log = toLog(&parser);
+        if (parser.curr + log->len > parser.size) {
+            printf("curr:%u, len=%u, size:%u\n", parser.curr, (unsigned)log->len, parser.size);
+            break;
+        }
+        snprintf(buf, log->text_len + 1, "%s", log_text(log));
+        printf("[%7u] [%5u.%06u %02x %d] %s\n", parser.curr,
+                (unsigned)(log->ts_nsec / 1000000000),
+                (unsigned)(log->ts_nsec % 1000000000) / 1000,
+                log->flags, log->level,
+                buf);
+        parser.curr += log->len;
+        count++;
+    }
 
     return count;
 }
@@ -60,6 +100,7 @@ int main(int argc, char **argv)
     unsigned long offset;
 
     offset = strtoul(argv[2], NULL, 0);
+    printf("offset: %lu\n", offset);
 
     fd = open(argv[1], O_RDONLY);
     ASSERT(fd > 0);
