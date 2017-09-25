@@ -6,10 +6,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include "parser.h"
 #include "XDebug.h"
 
 typedef unsigned long long u64;
+typedef unsigned int u32;
 typedef unsigned short u16;
 typedef unsigned char u8;
 
@@ -42,17 +42,45 @@ struct KLogParser {
 
 /*****************************************************************************/
 
-static struct log *toLog(struct KLogParser *parser)
-{
-    return (struct log *)&((u8 *)parser->base)[parser->curr];
-}
-
 static char *log_text(const struct log *msg)
 {
     return (char *)msg + sizeof(struct log);
 }
 
-static int parse(int fd, unsigned int offset)
+static struct log *log_from_idx(char *log_buf, u32 idx)
+{
+    struct log *msg = (struct log *)(log_buf + idx);
+
+    /*
+     * A length == 0 record is the end of buffer marker. Wrap around and
+     * read the message at the start of the buffer.
+     */
+    if (!msg->len)
+        return (struct log *)log_buf;
+
+    return msg;
+}
+
+/* get next record; idx must point to valid msg */
+static u32 log_next(char *log_buf, u32 idx)
+{
+    struct log *msg = (struct log *)(log_buf + idx);
+
+    /* length == 0 indicates the end of the buffer; wrap */
+    /*
+     * A length == 0 record is the end of buffer marker. Wrap around and
+     * read the message at the start of the buffer as *this* one, and
+     * return the one after that.
+     */
+    DBG("msg->len = %d\n", msg->len);
+    if (!msg->len) {
+        msg = (struct log *)log_buf;
+        return msg->len;
+    }
+    return idx + msg->len;
+}
+
+static int parse(int fd, u32 start)
 {
     int ret;
     int count = 0;
@@ -60,33 +88,43 @@ static int parse(int fd, unsigned int offset)
     struct log *log;
     struct KLogParser parser;
     static char buf[512];
+    u32 idx;
+    u32 rotated = 0;
 
     ret = fstat(fd, &st);
     ASSERT(ret == 0);
-    ASSERT(st.st_size > offset);
+    ASSERT(st.st_size > start);
 
     parser.fd = fd;
     parser.base = (u8 *)mmap(NULL,
             st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
     ASSERT(MAP_FAILED != parser.base);
     parser.size = st.st_size;
-    parser.start = offset;
-    parser.curr = offset;
+    parser.start = start;
+    parser.curr = start;
 
+    idx = start;
     for ( ; ; ) {
-        log = toLog(&parser);
-        if (parser.curr + log->len > parser.size) {
-            printf("curr:%u, len=%u, size:%u\n", parser.curr, (unsigned)log->len, parser.size);
-            break;
-        }
+        log = log_from_idx(parser.base, idx);
+        
         snprintf(buf, log->text_len + 1, "%s", log_text(log));
-        printf("[%7u] [%5u.%06u %02x %d] %s\n", parser.curr,
+        printf("%7u: [%5u.%06u %02x %d] %s\n", idx,
                 (unsigned)(log->ts_nsec / 1000000000),
                 (unsigned)(log->ts_nsec % 1000000000) / 1000,
                 log->flags, log->level,
                 buf);
-        parser.curr += log->len;
         count++;
+
+        idx = log_next(parser.base, idx);
+        DBG("log_next_idx = %u\n", idx);
+        if (idx == 0 || idx >= parser.size) {
+            if (rotated) {
+                DBG("[EOF]\n");
+                break;
+            }
+            rotated = 1;
+            idx = 0;
+        }
     }
 
     return count;
@@ -94,16 +132,28 @@ static int parse(int fd, unsigned int offset)
 
 /*****************************************************************************/
 
+static void usage(const char *program)
+{
+    fprintf(stderr, "Usage: %s <logbuf-dumpfile> [start-offset]\n", program);
+    exit(EXIT_FAILURE);
+}
+
+/*****************************************************************************/
+
 int main(int argc, char **argv)
 {
     int fd;
-    unsigned long offset;
+    u32 offset = 0;
 
-    offset = strtoul(argv[2], NULL, 0);
-    printf("offset: %lu\n", offset);
+    if (argc < 2 || argc > 3)
+        usage(argv[0]);
 
     fd = open(argv[1], O_RDONLY);
-    ASSERT(fd > 0);
+    if (fd < 0)
+        usage(argv[0]);
+
+    if (argc > 2)
+        offset = strtoul(argv[2], NULL, 0);
 
     parse(fd, offset);
 

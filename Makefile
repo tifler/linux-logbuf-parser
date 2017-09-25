@@ -2,7 +2,7 @@ CC		:= gcc
 CFLAGS	:= -Wall -g
 #LFLAGS	:= -lpthread
 
-OBJS	+= parser.o main.o
+OBJS	+= main.o
 TARGET	:= logbuf-praser
 
 .PHONY: clean
